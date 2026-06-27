@@ -16,7 +16,9 @@ Usage:
 import argparse
 import base64
 import io
+import os
 import re
+import tempfile
 import time
 import uuid
 from typing import List, Optional, Union
@@ -46,15 +48,31 @@ INSTRUCTION = (
 )
 
 
+def get_device() -> str:
+    if torch.cuda.is_available():
+        name = torch.cuda.get_device_name(0)
+        vram = torch.cuda.get_device_properties(0).total_memory / 1e9
+        print(f"GPU detected: {name}  ({vram:.1f} GB VRAM)")
+        return "cuda"
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        print("GPU detected: Apple MPS")
+        return "mps"
+    print("No GPU found — loading on CPU (will be slow)")
+    return "cpu"
+
+
 def load_model(quantize: bool):
-    print(f"Loading {MODEL_ID} {'(4-bit quantized)' if quantize else '(bfloat16)'}…")
+    device = get_device()
+    print(f"Loading {MODEL_ID} {'(4-bit quantized)' if quantize else '(bfloat16)'} on {device}…")
     processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
 
     kwargs = dict(
         trust_remote_code=True,
-        device_map="auto",
+        device_map=device,
     )
     if quantize:
+        if device not in ("cuda",):
+            raise RuntimeError("4-bit quantization requires a CUDA GPU")
         kwargs["quantization_config"] = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_compute_dtype=torch.bfloat16,
@@ -66,7 +84,7 @@ def load_model(quantize: bool):
 
     model = Qwen2_5OmniForConditionalGeneration.from_pretrained(MODEL_ID, **kwargs)
     model.disable_talker()  # we only need text output, not TTS
-    print("Model ready.")
+    print(f"Model ready on {device}.")
     return processor, model
 
 
@@ -101,8 +119,56 @@ def decode_image(url: str) -> Image.Image:
     return Image.open(io.BytesIO(resp.content)).convert("RGB")
 
 
+def extract_video_frames(url: str, fps: float = 1.0, max_frames: int = 32) -> list[Image.Image]:
+    """
+    Decode a base64 or HTTP video URL, sample at `fps` frames/sec up to `max_frames`,
+    and return PIL Images resized to fit the model's pixel budget (64*28*28 ≈ 224×224).
+    """
+    import cv2
+
+    # Write video bytes to a temp file so cv2 can open it
+    if url.startswith("data:"):
+        _, data = url.split(",", 1)
+        raw = base64.b64decode(data)
+    else:
+        raw = http_requests.get(url, timeout=30).content
+
+    suffix = ".mp4"
+    if url.startswith("data:video/"):
+        mime = url.split(";")[0].split("/")[1]
+        suffix = f".{mime}"
+
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+        f.write(raw)
+        tmp_path = f.name
+
+    try:
+        cap = cv2.VideoCapture(tmp_path)
+        video_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        frame_interval = max(1, int(round(video_fps / fps)))
+        frames: list[Image.Image] = []
+        idx = 0
+        while len(frames) < max_frames:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            if idx % frame_interval == 0:
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                img = Image.fromarray(rgb).convert("RGB")
+                # Resize to fit 224×224 (≈ 64*28*28 px budget per frame)
+                img.thumbnail((224, 224), Image.LANCZOS)
+                frames.append(img)
+            idx += 1
+        cap.release()
+    finally:
+        os.unlink(tmp_path)
+
+    print(f"[INFO] extracted {len(frames)} frames from video")
+    return frames
+
+
 def extract_text_and_images(messages: List[Message]):
-    """Pull out the text content and any images from the request messages."""
+    """Pull out text, images, and video frames from request messages."""
     texts = []
     images = []
     for msg in messages:
@@ -114,6 +180,9 @@ def extract_text_and_images(messages: List[Message]):
                     texts.append(part.text)
                 elif part.type == "image_url" and part.image_url:
                     images.append(decode_image(part.image_url.url))
+                elif part.type == "video_url" and part.image_url:
+                    # video_url reuses image_url field to carry the data URL
+                    images.extend(extract_video_frames(part.image_url.url))
     return " ".join(texts), images
 
 
