@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GuardReasoner Omni — Safety Tester</title>
+  <style>
+    :root {
+      --bg: #0a0a0f;
+      --surface: #13131a;
+      --card: #1a1a24;
+      --border: #2a2a3a;
+      --text: #e8e8f0;
+      --muted: #7070a0;
+      --accent: #7c6af7;
+      --safe: #34d399;
+      --unsafe: #f87171;
+      --warn: #fbbf24;
+      --think-bg: #1a1a2e;
+      --think-border: #3a3a5c;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: 380px 1fr;
+      gap: 0;
+    }
+
+    /* ── Left panel ── */
+    .input-panel {
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      padding: 1.75rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+      height: 100vh;
+      overflow-y: auto;
+      position: sticky;
+      top: 0;
+    }
+
+    .brand { display: flex; flex-direction: column; gap: 0.2rem; }
+    .brand h1 { font-size: 1.15rem; font-weight: 700; }
+    .brand span {
+      font-size: 0.78rem;
+      color: var(--muted);
+    }
+    .model-pill {
+      display: inline-block;
+      background: rgba(124,106,247,0.15);
+      border: 1px solid rgba(124,106,247,0.35);
+      color: var(--accent);
+      font-size: 0.72rem;
+      padding: 0.2rem 0.6rem;
+      border-radius: 20px;
+      margin-top: 0.3rem;
+      width: fit-content;
+    }
+
+    label {
+      font-size: 0.78rem;
+      color: var(--muted);
+      display: block;
+      margin-bottom: 0.35rem;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+    }
+
+    textarea, input[type="text"] {
+      width: 100%;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-size: 0.9rem;
+      font-family: inherit;
+      padding: 0.65rem 0.8rem;
+      resize: vertical;
+      transition: border-color 0.15s;
+    }
+    textarea { min-height: 120px; }
+    textarea:focus, input[type="text"]:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    .field { display: flex; flex-direction: column; }
+
+    .media-tabs {
+      display: flex;
+      gap: 0.4rem;
+      margin-bottom: 0.6rem;
+    }
+    .media-tab {
+      padding: 0.3rem 0.8rem;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--muted);
+      font-size: 0.78rem;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .media-tab.active {
+      background: rgba(124,106,247,0.18);
+      border-color: var(--accent);
+      color: var(--text);
+    }
+
+    .media-drop {
+      border: 1px dashed var(--border);
+      border-radius: 8px;
+      padding: 1rem;
+      background: var(--card);
+      cursor: pointer;
+      transition: border-color 0.15s;
+      text-align: center;
+      color: var(--muted);
+      font-size: 0.82rem;
+    }
+    .media-drop:hover, .media-drop.drag-over {
+      border-color: var(--accent);
+      color: var(--text);
+    }
+    .media-drop input { display: none; }
+
+    #img-preview {
+      display: none;
+      width: 100%;
+      max-height: 180px;
+      object-fit: contain;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #000;
+      margin-top: 0.6rem;
+    }
+
+    #video-preview {
+      display: none;
+      width: 100%;
+      max-height: 180px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #000;
+      margin-top: 0.6rem;
+    }
+
+    .clear-media {
+      display: none;
+      font-size: 0.75rem;
+      color: var(--muted);
+      cursor: pointer;
+      text-align: right;
+      margin-top: 0.3rem;
+    }
+    .clear-media:hover { color: var(--unsafe); }
+
+    .btn {
+      padding: 0.75rem;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s, transform 0.1s;
+      margin-top: auto;
+    }
+    .btn:hover { opacity: 0.88; }
+    .btn:active { transform: scale(0.99); }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+    .status-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--muted);
+      display: inline-block;
+      margin-right: 0.4rem;
+      vertical-align: middle;
+    }
+    .status-dot.on { background: var(--safe); box-shadow: 0 0 6px var(--safe); }
+
+    /* ── Right panel ── */
+    .output-panel {
+      padding: 2rem;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+    }
+
+    .empty-state {
+      margin: auto;
+      text-align: center;
+      color: var(--muted);
+    }
+    .empty-state .icon { font-size: 2.5rem; margin-bottom: 0.75rem; }
+    .empty-state p { font-size: 0.9rem; }
+
+    .verdict-banner {
+      border-radius: 12px;
+      padding: 1.5rem 1.75rem;
+      display: flex;
+      align-items: center;
+      gap: 1.25rem;
+    }
+    .verdict-banner.safe {
+      background: rgba(52,211,153,0.08);
+      border: 2px solid var(--safe);
+    }
+    .verdict-banner.unsafe {
+      background: rgba(248,113,113,0.08);
+      border: 2px solid var(--unsafe);
+    }
+    .verdict-icon { font-size: 2.25rem; line-height: 1; }
+    .verdict-text h2 { font-size: 1.6rem; font-weight: 800; letter-spacing: 0.04em; }
+    .verdict-text h2.safe { color: var(--safe); }
+    .verdict-text h2.unsafe { color: var(--unsafe); }
+    .verdict-text .sub { font-size: 0.85rem; color: var(--muted); margin-top: 0.2rem; }
+
+    .section-title {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      margin-bottom: 0.6rem;
+    }
+
+    .tasks-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.75rem;
+    }
+    .task-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem 1.1rem;
+    }
+    .task-card .task-label { font-size: 0.75rem; color: var(--muted); margin-bottom: 0.35rem; }
+    .task-card .task-verdict {
+      font-size: 1rem;
+      font-weight: 700;
+    }
+    .task-card .task-verdict.harmful { color: var(--unsafe); }
+    .task-card .task-verdict.unharmful { color: var(--safe); }
+
+    .reasoning-block {
+      background: var(--think-bg);
+      border: 1px solid var(--think-border);
+      border-radius: 10px;
+      padding: 1.1rem 1.25rem;
+    }
+    .reasoning-block .think-header {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #7070a0;
+      margin-bottom: 0.75rem;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+    .think-icon { opacity: 0.7; }
+    .reasoning-text {
+      font-size: 0.875rem;
+      line-height: 1.7;
+      color: #b0b0cc;
+      white-space: pre-wrap;
+    }
+
+    .task-section { font-size: 0.85rem; margin-bottom: 0.5rem; }
+    .task-section strong { color: var(--text); }
+
+    .meta-row {
+      display: flex;
+      gap: 1rem;
+      font-size: 0.78rem;
+      color: var(--muted);
+    }
+    .meta-row span { display: flex; align-items: center; gap: 0.3rem; }
+
+    details summary {
+      font-size: 0.78rem;
+      color: var(--muted);
+      cursor: pointer;
+      user-select: none;
+    }
+    details summary:hover { color: var(--text); }
+    pre {
+      margin-top: 0.5rem;
+      padding: 0.75rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 0.75rem;
+      color: var(--muted);
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    .error-box {
+      background: rgba(251,191,36,0.08);
+      border: 1px solid var(--warn);
+      border-radius: 10px;
+      padding: 1rem 1.25rem;
+      color: var(--warn);
+      font-size: 0.88rem;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner {
+      width: 1rem; height: 1rem;
+      border: 2px solid rgba(255,255,255,0.2);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      display: inline-block;
+      vertical-align: middle;
+      margin-right: 0.5rem;
+    }
+
+    @media (max-width: 780px) {
+      body { grid-template-columns: 1fr; }
+      .input-panel { height: auto; position: static; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ── Left: inputs ── -->
+  <div class="input-panel">
+    <div class="brand">
+      <h1>GuardReasoner Omni</h1>
+      <span><span class="status-dot" id="status-dot"></span><span id="status-text">checking server…</span></span>
+      <div class="model-pill">zhu-thu-22/GuardReasoner-Omni-3B</div>
+    </div>
+
+    <div class="field">
+      <label>Endpoint</label>
+      <input type="text" id="endpoint" value="http://localhost:8001/v1/chat/completions">
+    </div>
+
+    <div class="field">
+      <label>Text to check</label>
+      <textarea id="text-input" placeholder="Enter a message to evaluate…"></textarea>
+    </div>
+
+    <div class="field">
+      <label>Media (optional)</label>
+      <div class="media-tabs">
+        <button class="media-tab active" onclick="switchMediaTab('image', this)">Image</button>
+        <button class="media-tab" onclick="switchMediaTab('video', this)">Video</button>
+      </div>
+
+      <div id="image-panel">
+        <div class="media-drop" id="img-drop"
+             onclick="document.getElementById('img-file').click()"
+             ondragover="onDragOver(event,'img-drop')" ondragleave="onDragLeave('img-drop')" ondrop="onDropImage(event)">
+          <input type="file" id="img-file" accept="image/*" onchange="onImageFileChange(event)">
+          Drop image here or click to browse
+        </div>
+        <img id="img-preview" alt="preview">
+      </div>
+
+      <div id="video-panel" style="display:none">
+        <div class="media-drop" id="video-drop"
+             onclick="document.getElementById('video-file').click()"
+             ondragover="onDragOver(event,'video-drop')" ondragleave="onDragLeave('video-drop')" ondrop="onDropVideo(event)">
+          <input type="file" id="video-file" accept="video/*" onchange="onVideoFileChange(event)">
+          Drop video here or click to browse<br>
+          <span style="font-size:0.72rem;opacity:0.6">Sampled at 1 FPS · max 32 frames · mp4/mov/webm</span>
+        </div>
+        <video id="video-preview" controls muted></video>
+      </div>
+
+      <div class="clear-media" id="clear-media" onclick="clearMedia()">✕ Remove</div>
+    </div>
+
+    <button class="btn" id="check-btn" onclick="runCheck()">Check Safety</button>
+  </div>
+
+  <!-- ── Right: output ── -->
+  <div class="output-panel" id="output-panel">
+    <div class="empty-state" id="empty-state">
+      <div class="icon">🔍</div>
+      <p>Submit text or an image to see<br>the safety analysis here.</p>
+    </div>
+  </div>
+
+  <script>
+    let mediaDataUrl = null;   // base64 data URL for image or video
+    let mediaType = null;      // "image" or "video"
+    let activeTab = "image";
+
+    // ── Server health check ──
+    async function checkServer() {
+      const dot = document.getElementById("status-dot");
+      const txt = document.getElementById("status-text");
+      try {
+        const ep = document.getElementById("endpoint").value.replace("/v1/chat/completions", "");
+        const res = await fetch(ep + "/docs", { signal: AbortSignal.timeout(2000) });
+        if (res.ok || res.status === 404) {
+          dot.classList.add("on");
+          txt.textContent = "server online";
+        } else throw new Error();
+      } catch {
+        dot.classList.remove("on");
+        txt.textContent = "server offline";
+      }
+    }
+    checkServer();
+    setInterval(checkServer, 5000);
+
+    // ── Tab switching ──
+    function switchMediaTab(tab, btn) {
+      activeTab = tab;
+      document.querySelectorAll(".media-tab").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      document.getElementById("image-panel").style.display = tab === "image" ? "block" : "none";
+      document.getElementById("video-panel").style.display = tab === "video" ? "block" : "none";
+      clearMedia();
+    }
+
+    // ── Drag & drop helpers ──
+    function onDragOver(e, id) { e.preventDefault(); document.getElementById(id).classList.add("drag-over"); }
+    function onDragLeave(id)   { document.getElementById(id).classList.remove("drag-over"); }
+
+    function onDropImage(e) {
+      e.preventDefault();
+      document.getElementById("img-drop").classList.remove("drag-over");
+      const file = e.dataTransfer.files[0];
+      if (file && file.type.startsWith("image/")) loadImageFile(file);
+    }
+    function onDropVideo(e) {
+      e.preventDefault();
+      document.getElementById("video-drop").classList.remove("drag-over");
+      const file = e.dataTransfer.files[0];
+      if (file && file.type.startsWith("video/")) loadVideoFile(file);
+    }
+
+    function onImageFileChange(e) { const f = e.target.files[0]; if (f) loadImageFile(f); }
+    function onVideoFileChange(e) { const f = e.target.files[0]; if (f) loadVideoFile(f); }
+
+    // ── Image loader ──
+    function loadImageFile(file) {
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const img = new Image();
+        img.onload = () => {
+          const MAX = 672;
+          let { width, height } = img;
+          if (width > MAX || height > MAX) {
+            const scale = MAX / Math.max(width, height);
+            width = Math.round(width * scale);
+            height = Math.round(height * scale);
+          }
+          const canvas = document.createElement("canvas");
+          canvas.width = width; canvas.height = height;
+          canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+          mediaDataUrl = canvas.toDataURL("image/jpeg", 0.88);
+          mediaType = "image";
+          document.getElementById("img-preview").src = mediaDataUrl;
+          document.getElementById("img-preview").style.display = "block";
+          document.getElementById("clear-media").style.display = "block";
+          document.getElementById("img-drop").innerHTML =
+            `<input type="file" id="img-file" accept="image/*" onchange="onImageFileChange(event)">✓ ${escHtml(file.name)}`;
+          document.getElementById("img-drop").onclick = () => document.getElementById("img-file").click();
+        };
+        img.src = ev.target.result;
+      };
+      reader.readAsDataURL(file);
+    }
+
+    // ── Video loader ──
+    function loadVideoFile(file) {
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        mediaDataUrl = ev.target.result;   // raw base64 data URL
+        mediaType = "video";
+        const vp = document.getElementById("video-preview");
+        vp.src = mediaDataUrl;
+        vp.style.display = "block";
+        document.getElementById("clear-media").style.display = "block";
+        document.getElementById("video-drop").innerHTML =
+          `<input type="file" id="video-file" accept="video/*" onchange="onVideoFileChange(event)">✓ ${escHtml(file.name)}<br><span style="font-size:0.72rem;opacity:0.6">Sampled at 1 FPS · max 32 frames on server</span>`;
+        document.getElementById("video-drop").onclick = () => document.getElementById("video-file").click();
+      };
+      reader.readAsDataURL(file);
+    }
+
+    function clearMedia() {
+      mediaDataUrl = null;
+      mediaType = null;
+      document.getElementById("img-preview").style.display = "none";
+      document.getElementById("video-preview").style.display = "none";
+      document.getElementById("clear-media").style.display = "none";
+      document.getElementById("img-drop").innerHTML =
+        '<input type="file" id="img-file" accept="image/*" onchange="onImageFileChange(event)">Drop image here or click to browse';
+      document.getElementById("img-drop").onclick = () => document.getElementById("img-file").click();
+      document.getElementById("video-drop").innerHTML =
+        '<input type="file" id="video-file" accept="video/*" onchange="onVideoFileChange(event)">Drop video here or click to browse<br><span style="font-size:0.72rem;opacity:0.6">Sampled at 1 FPS · max 32 frames · mp4/mov/webm</span>';
+      document.getElementById("video-drop").onclick = () => document.getElementById("video-file").click();
+    }
+
+    // ── Main request ──
+    async function runCheck() {
+      const endpoint = document.getElementById("endpoint").value.trim();
+      const text = document.getElementById("text-input").value.trim();
+      const btn = document.getElementById("check-btn");
+
+      if (!text && !mediaDataUrl) {
+        showError("Enter some text or pick an image / video to check.");
+        return;
+      }
+
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span>Analyzing…';
+      document.getElementById("empty-state")?.remove();
+
+      const content = [];
+      if (mediaDataUrl) {
+        // video_url and image_url both use image_url field to carry the data URL;
+        // server distinguishes by the `type` field
+        content.push({ type: `${mediaType}_url`, image_url: { url: mediaDataUrl } });
+      }
+      if (text) content.push({ type: "text", text });
+
+      const t0 = performance.now();
+      try {
+        const res = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            messages: [{ role: "user", content }],
+            max_tokens: 512,
+          }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+
+        const data = await res.json();
+        const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+        const raw = data?.choices?.[0]?.message?.content?.trim() ?? "";
+        renderResult(raw, data, elapsed);
+      } catch (err) {
+        showError(err.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Check Safety";
+      }
+    }
+
+    // ── Parse response ──
+    function parseResponse(raw) {
+      const lines = raw.split("\n").map(l => l.trim()).filter(Boolean);
+      const verdict = lines[0]?.toLowerCase().startsWith("unsafe") ? "unsafe" : "safe";
+
+      // Extract result line: "User request:harmful\nAI response:unharmful"
+      const resultLine = lines.find(l => l.toLowerCase().includes("user request")) || "";
+      const aiLine = lines.find(l => l.toLowerCase().includes("ai response")) || "";
+
+      const userHarmful = /harmful/.test(resultLine.toLowerCase().replace("unharmful","SAFE"));
+      const aiHarmful   = /harmful/.test(aiLine.toLowerCase().replace("unharmful","SAFE"));
+
+      // Extract reasoning from <reasoning>…</reasoning>
+      const reasonMatch = raw.match(/<reasoning>([\s\S]*?)<\/reasoning>/i);
+      const reasoning = reasonMatch ? reasonMatch[1].trim() : "";
+
+      return { verdict, userHarmful, aiHarmful, reasoning, resultLine, aiLine };
+    }
+
+    function renderResult(raw, data, elapsed) {
+      const { verdict, userHarmful, aiHarmful, reasoning, resultLine, aiLine } = parseResponse(raw);
+      const out = document.getElementById("output-panel");
+
+      const tokens = data?.usage?.total_tokens ?? "—";
+
+      out.innerHTML = `
+        <div class="verdict-banner ${verdict}">
+          <div class="verdict-icon">${verdict === "safe" ? "✅" : "🚫"}</div>
+          <div class="verdict-text">
+            <h2 class="${verdict}">${verdict.toUpperCase()}</h2>
+            <div class="sub">${verdict === "safe" ? "No policy violations detected" : "Policy violation detected"}</div>
+          </div>
+        </div>
+
+        <div>
+          <div class="section-title">Assessment breakdown</div>
+          <div class="tasks-grid">
+            <div class="task-card">
+              <div class="task-label">User request</div>
+              <div class="task-verdict ${userHarmful ? 'harmful' : 'unharmful'}">
+                ${userHarmful ? "⚠ Harmful" : "✓ Unharmful"}
+              </div>
+            </div>
+            <div class="task-card">
+              <div class="task-label">AI response</div>
+              <div class="task-verdict ${aiHarmful ? 'harmful' : 'unharmful'}">
+                ${aiHarmful ? "⚠ Harmful" : "✓ Unharmful"}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        ${reasoning ? `
+        <div>
+          <div class="section-title">Chain-of-thought reasoning</div>
+          <div class="reasoning-block">
+            <div class="think-header"><span class="think-icon">🧠</span> GuardReasoner's thinking</div>
+            <div class="reasoning-text">${escHtml(reasoning)}</div>
+          </div>
+        </div>` : ""}
+
+        <div class="meta-row">
+          <span>⏱ ${elapsed}s</span>
+          <span>🔢 ${tokens} tokens</span>
+          <span>🤖 GuardReasoner-Omni-3B</span>
+        </div>
+
+        <details>
+          <summary>Raw response</summary>
+          <pre>${escHtml(JSON.stringify(data, null, 2))}</pre>
+        </details>
+      `;
+    }
+
+    function showError(msg) {
+      const out = document.getElementById("output-panel");
+      document.getElementById("empty-state")?.remove();
+      out.innerHTML = `<div class="error-box">⚠ ${escHtml(msg)}</div>`;
+    }
+
+    function escHtml(s) {
+      return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+    }
+  </script>
+</body>
+</html>
