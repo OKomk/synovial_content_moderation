@@ -1,0 +1,5 @@
+content-moderation-dataset/
+.env
+__pycache__/
+content-checker/
+.DS_Store

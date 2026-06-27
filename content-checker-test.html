@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Content Checker — Image NSFW Test (NSFWJS, fully local)</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --border: #334155;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --accent: #6366f1;
+      --safe: #22c55e;
+      --danger: #ef4444;
+      --warn: #f59e0b;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      justify-content: center;
+      padding: 2rem 1rem;
+    }
+
+    .card {
+      width: 100%;
+      max-width: 540px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 1.75rem;
+    }
+
+    h1 { font-size: 1.4rem; margin: 0 0 0.25rem; }
+    p.sub { margin: 0 0 1.25rem; color: var(--muted); font-size: 0.9rem; }
+
+    .status {
+      font-size: 0.85rem;
+      padding: 0.5rem 0.75rem;
+      border-radius: 8px;
+      margin-bottom: 1.25rem;
+      background: rgba(99,102,241,0.12);
+      border: 1px solid var(--accent);
+    }
+    .status.ready { background: rgba(34,197,94,0.12); border-color: var(--safe); color: var(--safe); }
+    .status.error { background: rgba(239,68,68,0.12); border-color: var(--danger); color: var(--danger); }
+
+    label { display: block; font-size: 0.85rem; margin-bottom: 0.4rem; color: var(--muted); }
+
+    input[type="file"] {
+      width: 100%;
+      padding: 0.65rem 0.75rem;
+      background: #0f172a;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-size: 0.9rem;
+      margin-bottom: 1.25rem;
+    }
+    input[type="file"]:disabled { opacity: 0.5; }
+
+    input[type="file"]::file-selector-button {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      padding: 0.45rem 0.8rem;
+      border-radius: 6px;
+      margin-right: 0.75rem;
+      cursor: pointer;
+    }
+
+    #preview {
+      display: none;
+      width: 100%;
+      max-height: 300px;
+      object-fit: contain;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      margin-bottom: 1.25rem;
+      background: #000;
+    }
+
+    #verdict {
+      margin-top: 0.25rem;
+      padding: 0.9rem 1rem;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      display: none;
+    }
+    #verdict.safe { display: block; background: rgba(34,197,94,0.12); border: 1px solid var(--safe); color: var(--safe); }
+    #verdict.danger { display: block; background: rgba(239,68,68,0.12); border: 1px solid var(--danger); color: var(--danger); }
+
+    .bars { margin-top: 1rem; display: none; }
+    .bar-row { margin-bottom: 0.6rem; }
+    .bar-label { display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--muted); margin-bottom: 0.2rem; }
+    .bar-track { height: 8px; background: #0f172a; border-radius: 6px; overflow: hidden; }
+    .bar-fill { height: 100%; background: var(--accent); border-radius: 6px; transition: width 0.3s ease; }
+    .bar-fill.nsfw { background: var(--danger); }
+  </style>
+</head>
+
+<body>
+  <div class="card">
+    <h1>Content Checker</h1>
+    <p class="sub">Image NSFW moderation — runs 100% in your browser with NSFWJS. No API key, no server.</p>
+
+    <div id="status" class="status">Loading model… (first load downloads ~5 MB, please wait)</div>
+
+    <label for="imageInput">Image (PNG or JPEG)</label>
+    <input type="file" id="imageInput" accept="image/png, image/jpeg" disabled>
+
+    <img id="preview" alt="Selected image preview">
+
+    <div id="verdict"></div>
+    <div class="bars" id="bars"></div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/nsfwjs@4.3.0/dist/browser/nsfwjs.min.js"></script>
+  <script>
+    const MODEL_URL =
+      "https://cdn.jsdelivr.net/gh/infinitered/nsfwjs@master/models/mobilenet_v2/";
+
+    // Categories that count as NSFW when they are the top prediction.
+    const NSFW_CLASSES = ["Porn", "Hentai", "Sexy"];
+
+    const statusEl = document.getElementById("status");
+    const imageInput = document.getElementById("imageInput");
+    const preview = document.getElementById("preview");
+    const verdict = document.getElementById("verdict");
+    const bars = document.getElementById("bars");
+
+    let model = null;
+
+    (async function init() {
+      try {
+        model = await nsfwjs.load(MODEL_URL);
+        statusEl.textContent = "Model ready — pick an image to check.";
+        statusEl.className = "status ready";
+        imageInput.disabled = false;
+      } catch (err) {
+        console.error("Failed to load model:", err);
+        statusEl.textContent =
+          "Failed to load model. Check your internet connection and reload. " +
+          (err && err.message ? `(${err.message})` : "");
+        statusEl.className = "status error";
+      }
+    })();
+
+    imageInput.addEventListener("change", (event) => {
+      const file = event.target.files[0];
+      verdict.className = "";
+      bars.style.display = "none";
+      bars.innerHTML = "";
+      if (!file) {
+        preview.style.display = "none";
+        return;
+      }
+      preview.src = URL.createObjectURL(file);
+      preview.style.display = "block";
+    });
+
+    preview.addEventListener("load", async () => {
+      if (!model) return;
+      verdict.textContent = "Analyzing…";
+      verdict.className = "danger";
+      verdict.style.background = "rgba(99,102,241,0.12)";
+      verdict.style.borderColor = "#6366f1";
+      verdict.style.color = "#e2e8f0";
+
+      try {
+        const predictions = await model.classify(preview);
+        renderResults(predictions);
+      } catch (err) {
+        console.error("Error classifying image:", err);
+        verdict.textContent = `Error analyzing image: ${err.message}`;
+        verdict.className = "danger";
+        verdict.style = "";
+      }
+    });
+
+    function renderResults(predictions) {
+      const sorted = [...predictions].sort(
+        (a, b) => b.probability - a.probability,
+      );
+      const top = sorted[0];
+      const isNSFW = NSFW_CLASSES.includes(top.className);
+
+      verdict.style = "";
+      if (isNSFW) {
+        verdict.textContent = `NSFW content detected — ${top.className} (${(top.probability * 100).toFixed(1)}%)`;
+        verdict.className = "danger";
+      } else {
+        verdict.textContent = `Image is safe — ${top.className} (${(top.probability * 100).toFixed(1)}%)`;
+        verdict.className = "safe";
+      }
+
+      bars.innerHTML = "";
+      for (const p of sorted) {
+        const pct = (p.probability * 100).toFixed(1);
+        const isBad = NSFW_CLASSES.includes(p.className);
+        const row = document.createElement("div");
+        row.className = "bar-row";
+        row.innerHTML = `
+          <div class="bar-label"><span>${p.className}</span><span>${pct}%</span></div>
+          <div class="bar-track"><div class="bar-fill ${isBad ? "nsfw" : ""}" style="width:${pct}%"></div></div>
+        `;
+        bars.appendChild(row);
+      }
+      bars.style.display = "block";
+    }
+  </script>
+</body>
+
+</html>

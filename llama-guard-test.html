@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Llama Guard 4 — Safety Tester</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --border: #334155;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --accent: #6366f1;
+      --safe: #22c55e;
+      --danger: #ef4444;
+      --warn: #f59e0b;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      justify-content: center;
+      padding: 2rem 1rem;
+    }
+
+    .card {
+      width: 100%;
+      max-width: 620px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 1.75rem;
+      height: fit-content;
+    }
+
+    h1 { font-size: 1.4rem; margin: 0 0 0.25rem; }
+    p.sub { margin: 0 0 1.5rem; color: var(--muted); font-size: 0.9rem; }
+
+    .row { display: flex; gap: 0.75rem; margin-bottom: 1rem; align-items: center; }
+
+    label { display: block; font-size: 0.85rem; margin-bottom: 0.4rem; color: var(--muted); }
+
+    input[type="text"], textarea {
+      width: 100%;
+      padding: 0.65rem 0.75rem;
+      background: #0f172a;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-size: 0.9rem;
+      font-family: inherit;
+      resize: vertical;
+    }
+    input[type="text"]:focus, textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    textarea { min-height: 100px; }
+
+    .role-toggle {
+      display: flex;
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+    }
+    .role-btn {
+      padding: 0.4rem 0.9rem;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--muted);
+      font-size: 0.85rem;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .role-btn.active {
+      background: rgba(99,102,241,0.2);
+      border-color: var(--accent);
+      color: var(--text);
+    }
+
+    input[type="file"] {
+      width: 100%;
+      padding: 0.65rem 0.75rem;
+      background: #0f172a;
+      border: 1px dashed var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-size: 0.9rem;
+      margin-bottom: 1rem;
+      cursor: pointer;
+    }
+    input[type="file"]::file-selector-button {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      padding: 0.4rem 0.75rem;
+      border-radius: 6px;
+      margin-right: 0.75rem;
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+
+    #img-preview {
+      display: none;
+      width: 100%;
+      max-height: 220px;
+      object-fit: contain;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      margin-bottom: 1rem;
+      background: #000;
+    }
+
+    .btn {
+      width: 100%;
+      padding: 0.75rem;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s;
+      margin-bottom: 1.25rem;
+    }
+    .btn:hover { opacity: 0.88; }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    #verdict {
+      display: none;
+      padding: 1.1rem 1.25rem;
+      border-radius: 10px;
+      font-size: 1.5rem;
+      font-weight: 700;
+      margin-bottom: 1rem;
+      text-align: center;
+      letter-spacing: 0.02em;
+    }
+    #verdict .sub {
+      display: block;
+      font-size: 0.8rem;
+      font-weight: 400;
+      opacity: 0.75;
+      margin-top: 0.2rem;
+      letter-spacing: 0;
+    }
+    #verdict.safe  { display: block; background: rgba(34,197,94,0.15); border: 2px solid var(--safe); color: var(--safe); }
+    #verdict.unsafe { display: block; background: rgba(239,68,68,0.15); border: 2px solid var(--danger); color: var(--danger); }
+    #verdict.error  { display: block; background: rgba(245,158,11,0.12); border: 1px solid var(--warn); color: var(--warn); font-size: 0.9rem; font-weight: 500; text-align: left; }
+
+    .categories {
+      display: none;
+      margin-bottom: 1rem;
+    }
+    .cat-tag {
+      display: inline-block;
+      margin: 0.2rem 0.3rem 0.2rem 0;
+      padding: 0.3rem 0.65rem;
+      border-radius: 20px;
+      font-size: 0.8rem;
+      background: rgba(239,68,68,0.12);
+      border: 1px solid var(--danger);
+      color: var(--danger);
+    }
+
+    details {
+      margin-top: 0.5rem;
+    }
+    summary {
+      font-size: 0.82rem;
+      color: var(--muted);
+      cursor: pointer;
+      user-select: none;
+    }
+    summary:hover { color: var(--text); }
+    pre {
+      margin: 0.5rem 0 0;
+      padding: 0.75rem;
+      background: #0f172a;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 0.78rem;
+      color: var(--muted);
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    .divider {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 1.25rem 0;
+    }
+
+    .img-tabs { display: flex; gap: 0.4rem; margin-bottom: 0.6rem; }
+    .img-tab {
+      padding: 0.3rem 0.75rem;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--muted);
+      font-size: 0.8rem;
+      cursor: pointer;
+    }
+    .img-tab.active { background: rgba(99,102,241,0.2); border-color: var(--accent); color: var(--text); }
+
+    .endpoint-row {
+      display: flex;
+      gap: 0.5rem;
+      margin-bottom: 1.5rem;
+      align-items: flex-end;
+    }
+    .endpoint-row > div { flex: 1; }
+    .endpoint-row label { margin-bottom: 0.3rem; }
+  </style>
+</head>
+
+<body>
+  <div class="card">
+    <h1>Llama Guard 4</h1>
+    <p class="sub">Safety classification via your local vLLM endpoint — no data leaves your machine.</p>
+
+    <div class="endpoint-row">
+      <div>
+        <label for="endpoint">Endpoint</label>
+        <input type="text" id="endpoint" value="http://localhost:8000/v1/chat/completions">
+      </div>
+    </div>
+
+    <label>Role</label>
+    <div class="role-toggle">
+      <button class="role-btn active" data-role="user" onclick="setRole('user', this)">User</button>
+      <button class="role-btn" data-role="assistant" onclick="setRole('assistant', this)">Assistant</button>
+    </div>
+
+    <label for="text-input">Text to check</label>
+    <textarea id="text-input" placeholder="Enter a message to evaluate for safety…"></textarea>
+
+    <hr class="divider">
+
+    <label>Image (optional)</label>
+    <div class="img-tabs">
+      <button class="img-tab active" onclick="switchImgTab('url', this)">URL</button>
+      <button class="img-tab" onclick="switchImgTab('file', this)">Local file</button>
+    </div>
+    <div id="img-url-panel">
+      <input type="text" id="img-url-input" placeholder="https://example.com/image.jpg" oninput="onUrlInput()">
+    </div>
+    <div id="img-file-panel" style="display:none">
+      <input type="file" id="img-input" accept="image/png,image/jpeg,image/webp,image/gif">
+    </div>
+    <img id="img-preview" alt="Image preview">
+
+    <button class="btn" id="check-btn" onclick="runCheck()">Check Safety</button>
+
+    <div id="verdict"></div>
+    <div class="categories" id="categories"></div>
+
+    <details id="raw-details" style="display:none">
+      <summary>Raw response</summary>
+      <pre id="raw-json"></pre>
+    </details>
+  </div>
+
+  <script>
+    const CATEGORY_MAP = {
+      S1:  "Violent Crimes",
+      S2:  "Non-Violent Crimes",
+      S3:  "Sex-Related Crimes",
+      S4:  "Child Sexual Exploitation",
+      S5:  "Defamation",
+      S6:  "Specialized Advice",
+      S7:  "Privacy",
+      S8:  "Intellectual Property",
+      S9:  "Indiscriminate Weapons",
+      S10: "Hate",
+      S11: "Suicide & Self-Harm",
+      S12: "Sexual Content",
+      S13: "Elections",
+    };
+
+    let currentRole = "user";
+    let imageDataUrl = null;
+    let imgMode = "url";
+
+    function setRole(role, btn) {
+      currentRole = role;
+      document.querySelectorAll(".role-btn").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+    }
+
+    function switchImgTab(mode, btn) {
+      imgMode = mode;
+      document.querySelectorAll(".img-tab").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      document.getElementById("img-url-panel").style.display = mode === "url" ? "block" : "none";
+      document.getElementById("img-file-panel").style.display = mode === "file" ? "block" : "none";
+      imageDataUrl = null;
+      document.getElementById("img-preview").style.display = "none";
+    }
+
+    function onUrlInput() {
+      const url = document.getElementById("img-url-input").value.trim();
+      const preview = document.getElementById("img-preview");
+      if (url) {
+        preview.src = url;
+        preview.style.display = "block";
+        imageDataUrl = url;
+      } else {
+        preview.style.display = "none";
+        imageDataUrl = null;
+      }
+    }
+
+    document.getElementById("img-input").addEventListener("change", (e) => {
+      const file = e.target.files[0];
+      const preview = document.getElementById("img-preview");
+      if (!file) {
+        imageDataUrl = null;
+        preview.style.display = "none";
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const img = new Image();
+        img.onload = () => {
+          // Resize to max 336px — single Llama 4 vision tile (~196 tokens)
+          const MAX = 336;
+          let { width, height } = img;
+          if (width > MAX || height > MAX) {
+            const scale = MAX / Math.max(width, height);
+            width = Math.round(width * scale);
+            height = Math.round(height * scale);
+          }
+          const canvas = document.createElement("canvas");
+          canvas.width = width;
+          canvas.height = height;
+          canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+          imageDataUrl = canvas.toDataURL("image/jpeg", 0.85);
+          preview.src = imageDataUrl;
+          preview.style.display = "block";
+        };
+        img.src = ev.target.result;
+      };
+      reader.readAsDataURL(file);
+    });
+
+    async function runCheck() {
+      const endpoint = document.getElementById("endpoint").value.trim();
+      const text = document.getElementById("text-input").value.trim();
+      const btn = document.getElementById("check-btn");
+      const verdict = document.getElementById("verdict");
+      const categories = document.getElementById("categories");
+      const rawDetails = document.getElementById("raw-details");
+      const rawJson = document.getElementById("raw-json");
+
+      if (!text && !imageDataUrl) {
+        showVerdict("error", "Enter some text or pick an image to check.");
+        return;
+      }
+
+      btn.disabled = true;
+      btn.textContent = "Checking…";
+      verdict.style.display = "none";
+      categories.style.display = "none";
+      rawDetails.style.display = "none";
+
+      const contentParts = [];
+      if (text) contentParts.push({ type: "text", text });
+      if (imageDataUrl) {
+        contentParts.push({ type: "image_url", image_url: { url: imageDataUrl } });
+      }
+
+      const body = {
+        model: "meta-llama/Llama-Guard-4-12B",
+        messages: [{ role: currentRole, content: contentParts }],
+        max_tokens: 20,
+      };
+
+      try {
+        const res = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+
+        if (!res.ok) {
+          const err = await res.text();
+          throw new Error(`HTTP ${res.status}: ${err}`);
+        }
+
+        const data = await res.json();
+        rawJson.textContent = JSON.stringify(data, null, 2);
+        rawDetails.style.display = "block";
+
+        const output = data?.choices?.[0]?.message?.content?.trim() ?? "";
+        parseAndRender(output);
+      } catch (err) {
+        showVerdict("error", `Request failed: ${err.message}`);
+        console.error(err);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Check Safety";
+      }
+    }
+
+    function parseAndRender(output) {
+      const categories = document.getElementById("categories");
+      const lc = output.toLowerCase();
+
+      if (lc.startsWith("safe")) {
+        showVerdict("safe", "✓ Safe", "No policy violations detected");
+        categories.style.display = "none";
+      } else if (lc.startsWith("unsafe")) {
+        const lines = output.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+        const codes = lines.slice(1);
+        const labels = codes.map(c => {
+          const key = c.toUpperCase();
+          return { code: key, label: CATEGORY_MAP[key] || key };
+        });
+
+        const sub = labels.length ? labels.map(l => l.code).join(", ") : "no category returned";
+        showVerdict("unsafe", "✗ Unsafe", `Violated: ${sub}`);
+
+        if (labels.length) {
+          categories.innerHTML = labels.map(l =>
+            `<span class="cat-tag" title="${l.code}">${l.code}: ${l.label}</span>`
+          ).join("");
+          categories.style.display = "block";
+        }
+      } else {
+        showVerdict("error", `Unexpected response: "${output}"`, "");
+      }
+    }
+
+    function showVerdict(cls, msg, sub) {
+      const el = document.getElementById("verdict");
+      el.innerHTML = msg + (sub ? `<span class="sub">${sub}</span>` : "");
+      el.className = cls;
+    }
+  </script>
+</body>
+
+</html>
