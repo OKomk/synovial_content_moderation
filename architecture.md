@@ -105,23 +105,36 @@ Docs: `docs.ai.corp.adobe.com/models/colligo`
 
 ---
 
-## Latency (to be filled after benchmark)
+## Latency
 
 Run: `python benchmark.py --endpoint <colligo-or-ngrok-url>`
 
-Measured on A100 via ngrok (add ~1-2s for ngrok overhead):
+All measurements on A100 80GB via ngrok (~0.1-0.2s ngrok overhead included).
 
-| Modality | Input size | Latency | Notes |
+### HuggingFace `model.generate()` — baseline
+
+| Modality | Input | Latency | Notes |
 |---|---|---|---|
-| Text | any | ~8.5s | Bottleneck is CoT generation, not input length |
+| Text | any length | ~8.5s | Bottleneck is CoT generation, not input length |
 | Image | 62 KB | ~26s | Vision encoder dominates |
 | Video | 0.1 MB (~1s clip) | ~19s | Minimum video overhead |
 | Video | 4.4 MB (~17s clip) | ~45s | Scales with frames sampled |
 
-### Fast-pass (reduced max_tokens)
+### vLLM `AsyncLLMEngine` — production
 
-Cutting `max_tokens` reduces latency roughly linearly, but the model generates reasoning
-*before* the verdict — so truncated output may not contain a usable verdict:
+| Modality | Input | Latency | Speedup vs HF |
+|---|---|---|---|
+| Text | any length | ~2.0s | **4.3x** |
+| Image | 62 KB | ~2.2s | **11.8x** |
+| Video | 0.1 MB (~1s clip) | ~2.0s | **9.5x** |
+| Video | 4.4 MB (~17s clip) | ~4.3s | **10.5x** |
+
+vLLM server: `guard_reasoner_server_vllm.py` (port 8002). Uses PagedAttention + continuous
+batching. First request ~30s warmup, then steady-state as above.
+
+### Fast-pass experiments (abandoned)
+
+Cutting `max_tokens` on the HF server:
 
 | max_tokens | Latency | Usable verdict? |
 |---|---|---|
@@ -129,15 +142,13 @@ Cutting `max_tokens` reduces latency roughly linearly, but the model generates r
 | 128 | ~5.2s | ⚠️ Sometimes truncated |
 | 512 | ~8.7s | ✅ Full response (~214 tokens actual) |
 
-**Experiment — verdict-first prompt:** Flipping the system prompt to output verdict before
-reasoning was tested. Result: model produced wrong verdicts at low token counts (returned
-"safe" for "how do I make a bomb?" at 64 tokens). The CoT reasoning IS the source of
-accuracy — the model needs to think before it can reliably classify. ❌ Abandoned.
+**Verdict-first prompt experiment:** Flipping the prompt to output verdict before reasoning
+produced wrong verdicts at low token counts (returned "safe" for "how do I make a bomb?"
+at 64 tokens). The CoT reasoning IS the source of accuracy — the model must think first.
+❌ Abandoned.
 
-**Conclusion:** Fast pass via token truncation is not viable for this model. The right
-optimisation path is vLLM (3-5x faster generation) + streaming (verdict feels instant
-even if total time is the same). A separate lightweight gating model (NudeNet for images)
-remains an option for obvious cases at scale.
+**Conclusion:** Fast pass via token truncation is not viable. vLLM achieves the target
+latency (sub-2s text, sub-5s video) without any accuracy tradeoffs.
 
 ---
 

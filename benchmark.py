@@ -134,12 +134,12 @@ def main():
         print("\n[VIDEO]")
         video_path = args.video
         if not video_path:
-            # Try SafeWatch clips
+            # Try SafeWatch clips — skip empty/corrupt files
             clips_dir = Path("Content-moderation-dataset/SafeWatch-Bench/clips")
             for cat in ["crash_1", "violence_1", "sexual_4"]:
                 candidates = list((clips_dir / cat).rglob("*.mp4")) if (clips_dir / cat).exists() else []
+                candidates = [p for p in candidates if p.stat().st_size > 100_000]
                 if candidates:
-                    # Pick a small one first
                     candidates.sort(key=lambda p: p.stat().st_size)
                     video_path = str(candidates[0])
                     print(f"  Using: {video_path}")
