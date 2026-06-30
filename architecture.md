@@ -1,99 +1,146 @@
-# Content Moderation — Model Architecture
-
-Exploring a tiered approach: a lightweight fast model for high-volume pre-screening, with a heavier reasoning model for borderline or high-stakes cases.
+# Content Moderation — Architecture
 
 ---
 
-## Models Under Evaluation
+## Models
 
-### Llama Guard 4-12B — *primary (text + image)*
-- **By:** Meta
-- **Size:** 12B params (~14GB bfloat16)
-- **Modalities:** Text, image (single image per request)
-- **Safety categories:** S1–S14 (violent crimes, sexual content, self-harm, etc.)
-- **Architecture:** Densely pruned from Llama 4 Scout; uses Llama 4 vision encoder
-- **Status:** ✅ Working locally via `server.py`. Text ~10s, image ~6 min on CPU
-- **Strengths:** Strong category coverage, OpenAI-compatible API, HuggingFace native
-- **Weaknesses:** Slow on CPU; missed illustrated NSFW (false negative on censored anime art); no video support
-- **Deployment:** Needs GPU (16GB+ VRAM) for practical latency
+### GuardReasoner Omni-3B ✅ *primary (all modalities)*
+- **Base:** Qwen2.5-Omni-3B, fine-tuned via SFT + GRPO on 148K safety samples
+- **Modalities:** Text, image, video, audio
+- **Safety categories:** Sexual content, violence, harassment, illegal activity, extremism, misinformation, hate speech
+- **Training data (video):** SafeWatch-Bench (16K samples — sexual, violence, extremism, illegal), UCF-Crime, XD-Violence, Video-SafetyBench
+- **Output:** Chain-of-thought reasoning in `<think>` tags + structured verdict in `<result>` tags
+- **Status:** Running on A100 via Colligo. 4-bit quantized fits on RTX 4060 (8GB).
+- **Latency (A100):** TBD — run `benchmark.py`
 
----
+### Llama Guard 4-12B ⚠️ *text + image only*
+- **Base:** Llama 4 Scout (12B), Meta
+- **Modalities:** Text, image (no video)
+- **Safety categories:** S1–S14
+- **Status:** Working. CPU-only (no GPU access during GarageWeek). Text ~10s, image ~6 min on CPU.
+- **Note:** Missed illustrated NSFW (false negative on censored anime art). Needs 16GB+ VRAM for practical latency.
 
-### SafeWatch 2B / 3B — *candidate (video)*
-- **By:** ByteDance / HKUST
-- **Size:** 2B or 3B params
-- **Modalities:** Video (frame-level + temporal reasoning)
-- **Status:** 🔬 To be evaluated
-- **Strengths:** Designed specifically for video content safety; temporal understanding across frames; much smaller than Llama Guard 4
-- **Weaknesses:** Video-specific — not a drop-in for text/image moderation; less coverage of nuanced categories
-- **Use case here:** Pre-screening video uploads before expensive full moderation
-
----
-
-### GuardReasoner Omni — *candidate (multimodal reasoning)*
-- **By:** GuardReasoner team
-- **Size:** ~7B (TBC)
-- **Modalities:** Text, image, audio, video
-- **Status:** 🔬 To be evaluated
-- **Strengths:** Chain-of-thought safety reasoning — explains *why* content is unsafe, not just a label; omni-modal (single model for all content types); strong on ambiguous/borderline cases
-- **Weaknesses:** Larger inference cost due to reasoning tokens; slower than classifier-only models
-- **Use case here:** Second-pass reasoning on borderline decisions from the fast-path model
-
----
-
-### NudeNet / Small Specialized Models — *candidate (cost efficiency)*
-- **Examples:** NudeNet, NSFW-MobileNet, NSFWJS (client-side), Falconsai NSFW detector
-- **Size:** <100MB
+### NudeNet / NSFWJS *fast pre-filter (image only)*
 - **Modalities:** Image only
-- **Status:** 🔬 NSFWJS already prototyped (`content-checker-test.html`)
-- **Strengths:** Runs in-browser or on CPU in milliseconds; near-zero cost at scale; great for visual nudity detection specifically
-- **Weaknesses:** Narrow category coverage (nudity only, no text/context/violence); no category breakdown; brittle on illustrations/art
-- **Use case here:** Fast pre-filter before invoking the 12B model — reject obvious cases cheaply
+- **Status:** NSFWJS prototyped client-side in `content-checker-test.html`
+- **Latency:** <100ms, runs in-browser
 
 ---
 
-## Proposed Tiered Architecture
+## Pipeline
 
 ```
-Incoming content
-       │
-       ▼
-┌──────────────────────────┐
-│  Tier 1: Fast filter     │  NudeNet / NSFWJS
-│  <100ms, CPU/browser     │  → PASS/FAIL on visual nudity only
-└──────────┬───────────────┘
-           │ flagged or uncertain
+Incoming content (text / image / video / audio)
+        │
+        ▼
+┌─────────────────────────────────┐
+│  Fast pass                      │  GuardReasoner Omni — low max_tokens (~128)
+│  ~Xs on GPU                     │  Verdict only, no reasoning
+└──────────┬──────────────────────┘
+           │ unsafe OR confidence < threshold
            ▼
-┌──────────────────────────┐
-│  Tier 2: Full moderation │  Llama Guard 4-12B  (text + image)
-│  ~1s on GPU              │  SafeWatch 2B/3B    (video)
-└──────────┬───────────────┘
-           │ borderline / high-stakes
+┌─────────────────────────────────┐
+│  Slow pass                      │  GuardReasoner Omni — full reasoning (~512 tokens)
+│  ~Xs on GPU                     │  Returns chain-of-thought explanation
+└──────────┬──────────────────────┘
+           │ unsafe
            ▼
-┌──────────────────────────┐
-│  Tier 3: Reasoning       │  GuardReasoner Omni
-│  explains decision       │  → human review queue with explanation
-└──────────────────────────┘
+   Human review queue
+   (with CoT explanation attached)
 ```
 
-Most traffic is handled cheaply at Tier 1. Tier 2 handles flagged content across all modalities. Tier 3 is reserved for ambiguous cases or where an audit trail is needed.
+> Fast/slow pass use the **same model** — fast pass reduces `max_tokens` to skip chain-of-thought
+> generation and just get the verdict. Slow pass only runs on flagged content.
+> Ensemble with a separate lightweight model (NudeNet for images) is a further option if
+> fast-pass latency is still too high at scale.
 
 ---
 
-## GPU Requirements Summary
+## AEM Integration
 
-| Model | Min VRAM | Inference latency (est. GPU) |
+### Option A: NUI Worker (preferred for GarageWeek)
+
+Create a new FMT in NUI core that wraps the GuardReasoner Omni Colligo endpoint:
+
+```
+AEM asset upload / rendition event
+        │
+        ▼
+  NUI Core (new FMT: content-moderation)
+        │  calls Colligo worker via HTTP
+        ▼
+  GuardReasoner Omni (Colligo)
+        │  returns verdict + reasoning
+        ▼
+  NUI writes result back to asset metadata
+  (e.g. dam:moderationVerdict, dam:moderationReason)
+```
+
+- **FMT definition:** Add a new worker type in NUI core that accepts image/video renditions
+- **Worker:** Colligo `ColligoMLModel` wrapping `guard_reasoner_server.py`
+- **Output:** Write verdict + CoT back to AEM asset metadata via NUI result handler
+- **Trigger:** On asset upload, or on-demand via workflow
+
+### Option B: AEM Workflow Step (heavier, not needed for POC)
+
+Direct Java OSGi workflow step calling the Colligo endpoint — more AEM-native but more
+overhead to set up. Better for production where you need retry logic, SLA tracking, etc.
+
+---
+
+## Deployment (Colligo)
+
+```python
+# Colligo worker skeleton
+from colligo import ColligoMLModel, build
+
+class ContentModerationWorker(ColligoMLModel):
+    @build.gpu_info(memory_gb=24)   # A10G or better
+    def build(self): ...
+    def predict(self, inputs): ...
+```
+
+Upload weights: `./m deps.upload_artifact`
+Docs: `docs.ai.corp.adobe.com/models/colligo`
+
+---
+
+## Latency (to be filled after benchmark)
+
+Run: `python benchmark.py --endpoint <colligo-or-ngrok-url>`
+
+Measured on A100 via ngrok (add ~1-2s for ngrok overhead):
+
+| Modality | Input size | Latency | Notes |
+|---|---|---|---|
+| Text | any | ~8.5s | Bottleneck is CoT generation, not input length |
+| Image | 62 KB | ~26s | Vision encoder dominates |
+| Video | 0.1 MB (~1s clip) | ~19s | Minimum video overhead |
+| Video | 4.4 MB (~17s clip) | ~45s | Scales with frames sampled |
+
+### Fast-pass (reduced max_tokens)
+
+Cutting `max_tokens` reduces latency roughly linearly, but the model generates reasoning
+*before* the verdict — so truncated output may not contain a usable verdict:
+
+| max_tokens | Latency | Usable verdict? |
 |---|---|---|
-| Llama Guard 4-12B | 16GB | ~1–2s / request |
-| SafeWatch 2B | 6GB | <1s / video clip |
-| SafeWatch 3B | 8GB | ~1s / video clip |
-| GuardReasoner Omni | 16GB | ~3–5s (reasoning) |
-| NudeNet / NSFWJS | None (CPU) | <100ms |
+| 64 | ~3.3s | ❌ CoT truncated, no `<result>` block |
+| 128 | ~5.2s | ⚠️ Sometimes truncated |
+| 512 | ~8.7s | ✅ Full response (~214 tokens actual) |
+
+**Implication:** Fast pass via token truncation doesn't work cleanly with GuardReasoner's
+current prompt format (reasoning first, verdict last). Options:
+1. Modify system prompt to output verdict first, then reasoning
+2. Use a separate lightweight classifier (NudeNet for images, small text classifier for text)
+   as a true fast-pass gating step before invoking GuardReasoner
 
 ---
 
-## Deployment Target
+## GPU Requirements
 
-Adobe's **Colligo inference platform** — wrap each model as a `ColligoMLModel` worker, allocate GPU via `build.gpu_info(memory_gb=N)`, upload weights to S3 via `./m deps.upload_artifact`. See the Colligo docs at `docs.ai.corp.adobe.com/models/colligo`.
-
-For **AI Foundry**: not suitable for custom model hosting — it's a managed catalog of pre-approved models only. Could request Llama Guard 4 be added via `aifoundry-preview.corp.adobe.com/byo-models` for production use.
+| Model | Min VRAM | Config |
+|---|---|---|
+| GuardReasoner Omni-3B bfloat16 | 8GB | Full precision |
+| GuardReasoner Omni-3B 4-bit | 4GB | `--quantize` flag |
+| Llama Guard 4-12B bfloat16 | 16GB | No quantization support |
