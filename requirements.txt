@@ -1,0 +1,16 @@
+# Core serving
+fastapi
+uvicorn[standard]
+
+# ML
+torch
+transformers
+accelerate
+bitsandbytes
+
+# Vision / video
+pillow
+opencv-python
+
+# Utilities
+requests
