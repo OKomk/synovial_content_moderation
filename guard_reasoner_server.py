@@ -10,7 +10,7 @@ Usage:
     # 4-bit quantization (needs ~4GB VRAM, much faster)
     python guard_reasoner_server.py --quantize
 
-    pip install fastapi uvicorn transformers torch pillow requests bitsandbytes accelerate
+    pip install fastapi uvicorn transformers torch pillow requests bitsandbytes accelerate qwen-omni-utils
 """
 
 import argparse
@@ -30,10 +30,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 from pydantic import BaseModel
+from qwen_omni_utils import process_mm_info
 from transformers import AutoProcessor, BitsAndBytesConfig, Qwen2_5OmniForConditionalGeneration
 
 MODEL_ID = "zhu-thu-22/GuardReasoner-Omni-3B"
-PORT = 8001  # different port from llama guard server
+PORT = 8001
 
 INSTRUCTION = (
     "You are a classifier for analyzing interactions between humans and AI. "
@@ -66,10 +67,7 @@ def load_model(quantize: bool):
     print(f"Loading {MODEL_ID} {'(4-bit quantized)' if quantize else '(bfloat16)'} on {device}…")
     processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
 
-    kwargs = dict(
-        trust_remote_code=True,
-        device_map=device,
-    )
+    kwargs = dict(trust_remote_code=True, device_map=device)
     if quantize:
         if device not in ("cuda",):
             raise RuntimeError("4-bit quantization requires a CUDA GPU")
@@ -83,7 +81,7 @@ def load_model(quantize: bool):
         kwargs["dtype"] = torch.bfloat16
 
     model = Qwen2_5OmniForConditionalGeneration.from_pretrained(MODEL_ID, **kwargs)
-    model.disable_talker()  # we only need text output, not TTS
+    model.disable_talker()
     print(f"Model ready on {device}.")
     return processor, model
 
@@ -105,7 +103,7 @@ class Message(BaseModel):
 class ChatRequest(BaseModel):
     model: str = MODEL_ID
     messages: List[Message]
-    max_tokens: Optional[int] = 512   # needs more tokens for chain-of-thought
+    max_tokens: Optional[int] = 512
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -119,14 +117,8 @@ def decode_image(url: str) -> Image.Image:
     return Image.open(io.BytesIO(resp.content)).convert("RGB")
 
 
-def extract_video_frames(url: str, fps: float = 1.0, max_frames: int = 32) -> list[Image.Image]:
-    """
-    Decode a base64 or HTTP video URL, sample at `fps` frames/sec up to `max_frames`,
-    and return PIL Images resized to fit the model's pixel budget (64*28*28 ≈ 224×224).
-    """
-    import cv2
-
-    # Write video bytes to a temp file so cv2 can open it
+def save_video_to_temp(url: str) -> str:
+    """Write video bytes to a named temp file and return its path. Caller must delete."""
     if url.startswith("data:"):
         _, data = url.split(",", 1)
         raw = base64.b64decode(data)
@@ -140,37 +132,17 @@ def extract_video_frames(url: str, fps: float = 1.0, max_frames: int = 32) -> li
 
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
         f.write(raw)
-        tmp_path = f.name
-
-    try:
-        cap = cv2.VideoCapture(tmp_path)
-        video_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-        frame_interval = max(1, int(round(video_fps / fps)))
-        frames: list[Image.Image] = []
-        idx = 0
-        while len(frames) < max_frames:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            if idx % frame_interval == 0:
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                img = Image.fromarray(rgb).convert("RGB")
-                # Resize to fit 224×224 (≈ 64*28*28 px budget per frame)
-                img.thumbnail((224, 224), Image.LANCZOS)
-                frames.append(img)
-            idx += 1
-        cap.release()
-    finally:
-        os.unlink(tmp_path)
-
-    print(f"[INFO] extracted {len(frames)} frames from video")
-    return frames
+        return f.name
 
 
-def extract_text_and_images(messages: List[Message]):
-    """Pull out text, images, and video frames from request messages."""
+def extract_content(messages: List[Message]):
+    """Return (user_text, pil_images, video_path_or_None).
+    video_path is a temp file — caller must delete it after inference.
+    """
     texts = []
     images = []
+    video_path = None
+
     for msg in messages:
         if isinstance(msg.content, str):
             texts.append(msg.content)
@@ -182,27 +154,36 @@ def extract_text_and_images(messages: List[Message]):
                     images.append(decode_image(part.image_url.url))
                 elif part.type == "video_url" and part.image_url:
                     # video_url reuses image_url field to carry the data URL
-                    images.extend(extract_video_frames(part.image_url.url))
-    return " ".join(texts), images
+                    video_path = save_video_to_temp(part.image_url.url)
+
+    return " ".join(texts), images, video_path
 
 
-def build_messages(user_text: str, images: list) -> list:
+def build_messages(user_text: str, images: list, video_path: str | None) -> list:
     """
-    GuardReasoner expects:
-      system: INSTRUCTION
-      user:   [optional image(s)] "Human User:\n{text}\n\nAI assistant:\n"
-    We treat the incoming content as the thing to moderate (the "Human User" turn).
+    Build Qwen2.5-Omni message dicts for process_mm_info + apply_chat_template.
+    Video uses the native {"type": "video"} content type so the model's temporal
+    encoder is used — not individual image frames.
     """
     user_content = []
 
-    # Add images before the text (Qwen2.5-Omni style)
-    for img in images:
-        user_content.append({"type": "image", "image": img})
+    if video_path:
+        # Native video content type: process_mm_info will handle frame sampling
+        user_content.append({
+            "type": "video",
+            "video": video_path,
+            "fps": 1,
+            "max_frames": 128,
+            "min_pixels": 4 * 28 * 28,   # matches model training config
+            "max_pixels": 64 * 28 * 28,
+        })
+    else:
+        for img in images:
+            user_content.append({"type": "image", "image": img})
 
-    # Wrap the content in the GuardReasoner prompt format
     user_content.append({
         "type": "text",
-        "text": f"Human User:\n{user_text}\n\nAI assistant:\n[no response — assess the user request only]"
+        "text": f"Human User:\n{user_text}\n\nAI assistant:\n[no response — assess the user request only]",
     })
 
     return [
@@ -219,9 +200,6 @@ def parse_verdict(raw: str) -> dict:
     result_text = result_match.group(1).strip() if result_match else raw.strip()
     reasoning   = think_match.group(1).strip()  if think_match  else ""
 
-    # Classify as harmful if either the request or response is flagged
-    is_harmful = "harmful" in result_text.lower() and "unharmful" not in result_text.lower().replace("harmful", "")
-    # More careful: check if "harmful" appears outside of "unharmful"
     cleaned = result_text.lower().replace("unharmful", "SAFE")
     is_harmful = "harmful" in cleaned
 
@@ -229,7 +207,7 @@ def parse_verdict(raw: str) -> dict:
     return {"verdict": verdict, "result": result_text, "reasoning": reasoning}
 
 
-# ── app setup (done after model loads) ─────────────────────────────────────
+# ── app setup ──────────────────────────────────────────────────────────────
 
 def make_app(processor, model):
     app = FastAPI()
@@ -242,40 +220,55 @@ def make_app(processor, model):
 
     @app.post("/v1/chat/completions")
     async def chat_completions(req: ChatRequest):
-        user_text, images = extract_text_and_images(req.messages)
-        messages = build_messages(user_text, images)
+        user_text, images, video_path = extract_content(req.messages)
+        messages = build_messages(user_text, images, video_path)
 
-        print(f"[INFO] images={len(images)}  text_len={len(user_text)}")
+        modality = "video" if video_path else (f"{len(images)} image(s)" if images else "text-only")
+        print(f"[INFO] modality={modality}  text_len={len(user_text)}")
 
-        # Apply Qwen2.5-Omni chat template
-        text_input = processor.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-
-        # Process inputs — images go through processor vision encoder
-        inputs = processor(
-            text=text_input,
-            images=images if images else None,
-            return_tensors="pt",
-        ).to(model.device)
-
-        with torch.no_grad():
-            output_ids = model.generate(
-                **inputs,
-                generation_mode="text",       # disable TTS talker
-                thinker_max_new_tokens=req.max_tokens or 512,
-                do_sample=False,
+        prompt_tokens = completion_tokens = total_tokens = 0
+        try:
+            text_input = processor.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
             )
 
-        new_tokens = output_ids[:, inputs["input_ids"].shape[-1]:]
-        raw_output = processor.batch_decode(new_tokens, skip_special_tokens=True)[0].strip()
+            # process_mm_info uses Qwen's native pipeline:
+            # - for images: loads PIL images
+            # - for video: samples frames at specified fps with temporal encoding
+            _, proc_images, proc_videos = process_mm_info(messages, use_audio_in_video=False)
+
+            inputs = processor(
+                text=text_input,
+                images=proc_images if proc_images else None,
+                videos=proc_videos if proc_videos else None,
+                return_tensors="pt",
+            ).to(model.device)
+
+            with torch.no_grad():
+                output_ids = model.generate(
+                    **inputs,
+                    generation_mode="text",
+                    thinker_max_new_tokens=req.max_tokens or 512,
+                    do_sample=False,
+                )
+
+            new_tokens = output_ids[:, inputs["input_ids"].shape[-1]:]
+            raw_output = processor.batch_decode(new_tokens, skip_special_tokens=True)[0].strip()
+
+            # Save token counts before tensors are freed
+            prompt_tokens     = int(inputs["input_ids"].shape[-1])
+            completion_tokens = int(new_tokens.shape[-1])
+            total_tokens      = int(output_ids.shape[-1])
+
+        finally:
+            if video_path and os.path.exists(video_path):
+                os.unlink(video_path)
 
         parsed = parse_verdict(raw_output)
         print(f"[INFO] verdict={parsed['verdict']}  raw={raw_output[:120]}…")
 
-        # Return both the structured verdict and full reasoning in the content
         content = f"{parsed['verdict']}\n\n{parsed['result']}\n\n<reasoning>{parsed['reasoning']}</reasoning>"
 
         return {
@@ -289,9 +282,9 @@ def make_app(processor, model):
                 "finish_reason": "stop",
             }],
             "usage": {
-                "prompt_tokens":     int(inputs["input_ids"].shape[-1]),
-                "completion_tokens": int(new_tokens.shape[-1]),
-                "total_tokens":      int(output_ids.shape[-1]),
+                "prompt_tokens":     prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens":      total_tokens,
             },
         }
 

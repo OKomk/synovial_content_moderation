@@ -2,15 +2,18 @@
 fastapi
 uvicorn[standard]
 
-# ML
+# ML — install with CUDA: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 torch
+torchvision
+torchaudio
 transformers
 accelerate
+qwen-omni-utils
 bitsandbytes
 
 # Vision / video
 pillow
-opencv-python
 
 # Utilities
 requests
+datasets
