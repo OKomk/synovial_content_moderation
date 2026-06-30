@@ -1,16 +1,17 @@
 """
-OpenAI-compatible server for GuardReasoner-Omni-3B.
-Supports text, image, and video moderation with chain-of-thought reasoning.
-Uses HuggingFace Transformers + optional bitsandbytes 4-bit quantization.
+vLLM-based OpenAI-compatible server for GuardReasoner-Omni-3B.
+Replaces HuggingFace generate() with vLLM's AsyncLLMEngine for:
+  - PagedAttention (efficient KV cache memory)
+  - Continuous batching (multiple concurrent requests share GPU compute)
+  - CUDA graph optimisation (reduced Python overhead per token)
+
+Expected speedup over HF server: 3-5x on A100.
 
 Usage:
-    # Full precision (bfloat16, needs ~12GB VRAM or ~12GB RAM on CPU)
-    python guard_reasoner_server.py
-
-    # 4-bit quantization (needs ~4GB VRAM, much faster)
-    python guard_reasoner_server.py --quantize
-
-    pip install fastapi uvicorn transformers torch pillow requests bitsandbytes accelerate qwen-omni-utils
+    pip install vllm qwen-omni-utils
+    python guard_reasoner_server_vllm.py
+    python guard_reasoner_server_vllm.py --quantize    # bitsandbytes 4-bit
+    python guard_reasoner_server_vllm.py --port 8002   # run alongside HF server
 """
 
 import argparse
@@ -24,17 +25,17 @@ import uuid
 from typing import List, Optional, Union
 
 import requests as http_requests
-import torch
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 from pydantic import BaseModel
 from qwen_omni_utils import process_mm_info
-from transformers import AutoProcessor, BitsAndBytesConfig, Qwen2_5OmniForConditionalGeneration
+from vllm import AsyncLLMEngine, SamplingParams
+from vllm.engine.arg_utils import AsyncEngineArgs
 
 MODEL_ID = "zhu-thu-22/GuardReasoner-Omni-3B"
-PORT = 8001
+PORT = 8002   # run alongside the HF server on 8001
 
 INSTRUCTION = (
     "You are a classifier for analyzing interactions between humans and AI. "
@@ -49,41 +50,25 @@ INSTRUCTION = (
 )
 
 
-def get_device() -> str:
-    if torch.cuda.is_available():
-        name = torch.cuda.get_device_name(0)
-        vram = torch.cuda.get_device_properties(0).total_memory / 1e9
-        print(f"GPU detected: {name}  ({vram:.1f} GB VRAM)")
-        return "cuda"
-    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        print("GPU detected: Apple MPS")
-        return "mps"
-    print("No GPU found — loading on CPU (will be slow)")
-    return "cpu"
+def load_engine(quantize: bool) -> AsyncLLMEngine:
+    print(f"Loading {MODEL_ID} with vLLM {'(4-bit bitsandbytes)' if quantize else '(bfloat16)'}…")
 
-
-def load_model(quantize: bool):
-    device = get_device()
-    print(f"Loading {MODEL_ID} {'(4-bit quantized)' if quantize else '(bfloat16)'} on {device}…")
-    processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
-
-    kwargs = dict(trust_remote_code=True, device_map=device)
+    kwargs = dict(
+        model=MODEL_ID,
+        trust_remote_code=True,
+        dtype="bfloat16",
+        limit_mm_per_prompt={"image": 16, "video": 4},
+        max_model_len=4096,
+        gpu_memory_utilization=0.90,
+    )
     if quantize:
-        if device not in ("cuda",):
-            raise RuntimeError("4-bit quantization requires a CUDA GPU")
-        kwargs["quantization_config"] = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type="nf4",
-        )
-    else:
-        kwargs["dtype"] = torch.bfloat16
+        kwargs["quantization"] = "bitsandbytes"
+        kwargs["load_format"] = "bitsandbytes"
 
-    model = Qwen2_5OmniForConditionalGeneration.from_pretrained(MODEL_ID, **kwargs)
-    model.disable_talker()
-    print(f"Model ready on {device}.")
-    return processor, model
+    engine_args = AsyncEngineArgs(**kwargs)
+    engine = AsyncLLMEngine.from_engine_args(engine_args)
+    print("vLLM engine ready.")
+    return engine
 
 
 # ── request schema (OpenAI-compatible subset) ──────────────────────────────
@@ -106,7 +91,7 @@ class ChatRequest(BaseModel):
     max_tokens: Optional[int] = 512
 
 
-# ── helpers ────────────────────────────────────────────────────────────────
+# ── helpers (identical to HF server) ───────────────────────────────────────
 
 def decode_image(url: str) -> Image.Image:
     if url.startswith("data:"):
@@ -118,31 +103,22 @@ def decode_image(url: str) -> Image.Image:
 
 
 def save_video_to_temp(url: str) -> str:
-    """Write video bytes to a named temp file and return its path. Caller must delete."""
     if url.startswith("data:"):
         _, data = url.split(",", 1)
         raw = base64.b64decode(data)
     else:
         raw = http_requests.get(url, timeout=30).content
-
     suffix = ".mp4"
     if url.startswith("data:video/"):
         mime = url.split(";")[0].split("/")[1]
         suffix = f".{mime}"
-
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
         f.write(raw)
         return f.name
 
 
 def extract_content(messages: List[Message]):
-    """Return (user_text, pil_images, video_path_or_None).
-    video_path is a temp file — caller must delete it after inference.
-    """
-    texts = []
-    images = []
-    video_path = None
-
+    texts, images, video_path = [], [], None
     for msg in messages:
         if isinstance(msg.content, str):
             texts.append(msg.content)
@@ -153,39 +129,28 @@ def extract_content(messages: List[Message]):
                 elif part.type == "image_url" and part.image_url:
                     images.append(decode_image(part.image_url.url))
                 elif part.type == "video_url" and part.image_url:
-                    # video_url reuses image_url field to carry the data URL
                     video_path = save_video_to_temp(part.image_url.url)
-
     return " ".join(texts), images, video_path
 
 
 def build_messages(user_text: str, images: list, video_path: str | None) -> list:
-    """
-    Build Qwen2.5-Omni message dicts for process_mm_info + apply_chat_template.
-    Video uses the native {"type": "video"} content type so the model's temporal
-    encoder is used — not individual image frames.
-    """
     user_content = []
-
     if video_path:
-        # Native video content type: process_mm_info will handle frame sampling
         user_content.append({
             "type": "video",
             "video": video_path,
             "fps": 1,
             "max_frames": 128,
-            "min_pixels": 4 * 28 * 28,   # matches model training config
+            "min_pixels": 4 * 28 * 28,
             "max_pixels": 64 * 28 * 28,
         })
     else:
         for img in images:
             user_content.append({"type": "image", "image": img})
-
     user_content.append({
         "type": "text",
         "text": f"Human User:\n{user_text}\n\nAI assistant:\n[no response — assess the user request only]",
     })
-
     return [
         {"role": "system", "content": INSTRUCTION},
         {"role": "user",   "content": user_content},
@@ -193,23 +158,18 @@ def build_messages(user_text: str, images: list, video_path: str | None) -> list
 
 
 def parse_verdict(raw: str) -> dict:
-    """Extract structured verdict from <result>...</result> block."""
     result_match = re.search(r"<result>(.*?)</result>", raw, re.DOTALL | re.IGNORECASE)
     think_match  = re.search(r"<think>(.*?)</think>",   raw, re.DOTALL | re.IGNORECASE)
-
     result_text = result_match.group(1).strip() if result_match else raw.strip()
     reasoning   = think_match.group(1).strip()  if think_match  else ""
-
     cleaned = result_text.lower().replace("unharmful", "SAFE")
     is_harmful = "harmful" in cleaned
-
-    verdict = "unsafe" if is_harmful else "safe"
-    return {"verdict": verdict, "result": result_text, "reasoning": reasoning}
+    return {"verdict": "unsafe" if is_harmful else "safe", "result": result_text, "reasoning": reasoning}
 
 
-# ── app setup ──────────────────────────────────────────────────────────────
+# ── app ─────────────────────────────────────────────────────────────────────
 
-def make_app(processor, model):
+def make_app(engine: AsyncLLMEngine, processor) -> FastAPI:
     app = FastAPI()
     app.add_middleware(
         CORSMiddleware,
@@ -226,41 +186,43 @@ def make_app(processor, model):
         modality = "video" if video_path else (f"{len(images)} image(s)" if images else "text-only")
         print(f"[INFO] modality={modality}  text_len={len(user_text)}")
 
-        prompt_tokens = completion_tokens = total_tokens = 0
         try:
             text_input = processor.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
+                messages, tokenize=False, add_generation_prompt=True
             )
-
-            # process_mm_info uses Qwen's native pipeline:
-            # - for images: loads PIL images
-            # - for video: samples frames at specified fps with temporal encoding
             _, proc_images, proc_videos = process_mm_info(messages, use_audio_in_video=False)
 
-            inputs = processor(
-                text=text_input,
-                images=proc_images if proc_images else None,
-                videos=proc_videos if proc_videos else None,
-                return_tensors="pt",
-            ).to(model.device)
+            mm_data = {}
+            if proc_images:
+                mm_data["image"] = proc_images
+            if proc_videos:
+                mm_data["video"] = proc_videos
 
-            with torch.no_grad():
-                output_ids = model.generate(
-                    **inputs,
-                    generation_mode="text",
-                    thinker_max_new_tokens=req.max_tokens or 512,
-                    do_sample=False,
-                )
+            sampling_params = SamplingParams(
+                temperature=0,
+                max_tokens=req.max_tokens or 512,
+            )
 
-            new_tokens = output_ids[:, inputs["input_ids"].shape[-1]:]
-            raw_output = processor.batch_decode(new_tokens, skip_special_tokens=True)[0].strip()
+            # vLLM multimodal input format: dict with "prompt" + optional "multi_modal_data"
+            vllm_input: dict = {"prompt": text_input}
+            if mm_data:
+                vllm_input["multi_modal_data"] = mm_data
 
-            # Save token counts before tensors are freed
-            prompt_tokens     = int(inputs["input_ids"].shape[-1])
-            completion_tokens = int(new_tokens.shape[-1])
-            total_tokens      = int(output_ids.shape[-1])
+            request_id = uuid.uuid4().hex
+            results_gen = engine.generate(
+                vllm_input,
+                sampling_params,
+                request_id=request_id,
+            )
+
+            # Collect full output (non-streaming)
+            final_output = None
+            async for out in results_gen:
+                final_output = out
+
+            raw_output = final_output.outputs[0].text.strip()
+            prompt_tokens     = len(final_output.prompt_token_ids)
+            completion_tokens = len(final_output.outputs[0].token_ids)
 
         finally:
             if video_path and os.path.exists(video_path):
@@ -284,22 +246,27 @@ def make_app(processor, model):
             "usage": {
                 "prompt_tokens":     prompt_tokens,
                 "completion_tokens": completion_tokens,
-                "total_tokens":      total_tokens,
+                "total_tokens":      prompt_tokens + completion_tokens,
             },
         }
 
     return app
 
 
-# ── entrypoint ─────────────────────────────────────────────────────────────
+# ── entrypoint ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--quantize", action="store_true",
-                        help="Load in 4-bit with bitsandbytes (saves ~8GB memory)")
+    parser.add_argument("--quantize", action="store_true")
     parser.add_argument("--port", type=int, default=PORT)
     args = parser.parse_args()
 
-    processor, model = load_model(args.quantize)
-    app = make_app(processor, model)
+    # vLLM engine
+    engine = load_engine(args.quantize)
+
+    # Processor for chat template + process_mm_info (no model weights needed)
+    from transformers import AutoProcessor
+    processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
+
+    app = make_app(engine, processor)
     uvicorn.run(app, host="0.0.0.0", port=args.port)

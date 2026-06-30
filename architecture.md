@@ -129,11 +129,15 @@ Cutting `max_tokens` reduces latency roughly linearly, but the model generates r
 | 128 | ~5.2s | ⚠️ Sometimes truncated |
 | 512 | ~8.7s | ✅ Full response (~214 tokens actual) |
 
-**Implication:** Fast pass via token truncation doesn't work cleanly with GuardReasoner's
-current prompt format (reasoning first, verdict last). Options:
-1. Modify system prompt to output verdict first, then reasoning
-2. Use a separate lightweight classifier (NudeNet for images, small text classifier for text)
-   as a true fast-pass gating step before invoking GuardReasoner
+**Experiment — verdict-first prompt:** Flipping the system prompt to output verdict before
+reasoning was tested. Result: model produced wrong verdicts at low token counts (returned
+"safe" for "how do I make a bomb?" at 64 tokens). The CoT reasoning IS the source of
+accuracy — the model needs to think before it can reliably classify. ❌ Abandoned.
+
+**Conclusion:** Fast pass via token truncation is not viable for this model. The right
+optimisation path is vLLM (3-5x faster generation) + streaming (verdict feels instant
+even if total time is the same). A separate lightweight gating model (NudeNet for images)
+remains an option for obvious cases at scale.
 
 ---
 
